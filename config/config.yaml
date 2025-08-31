@@ -1,0 +1,24 @@
+strategy:
+  base_capital: 1000000
+  risk_per_trade: 0.005  # 0.5%
+  stop_loss: 0.005       # 0.5%
+  profit_target: 0.02    # 2%
+  trailing_stop: 0.0075  # 0.75%
+  profit_trail_start: 0.005  # 0.5%
+  
+indicators:
+  ema_fast: 3
+  ema_slow: 10
+  ema_trend: 50
+  rsi_period: 14
+  rsi_overbought: 60
+  rsi_oversold: 30
+
+data:
+  timeframe_primary: 10T  # 10 minutes
+  timeframe_secondary: 1H # 1 hour
+  market_start: "09:15"
+  market_end: "15:30"
+  selection_time: "09:25"
+  selection_minutes: 10
+  top_stocks_count: 10
