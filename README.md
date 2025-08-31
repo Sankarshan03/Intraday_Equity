@@ -1,4 +1,4 @@
-# Complete Fix for Intraday EMA-RSI Strategy with Docker Deployment
+# Intraday EMA-RSI Trading Strategy (Streamlit Only)
 
 ## Updated README.md
 
@@ -15,7 +15,6 @@ A comprehensive intraday trading strategy implementation using Exponential Movin
 - **Risk Management**: Stop loss, profit targets, and trailing stops
 - **Backtesting Engine**: Comprehensive performance metrics
 - **Streamlit Dashboard**: Interactive web interface for analysis
-- **Docker Support**: Containerized deployment
 
 ## Strategy Rules
 
@@ -56,8 +55,6 @@ Intraday_Equity/
 ├── results/               # Backtest results output
 ├── config/                # Configuration files
 │   └── config.yaml        # Strategy configuration
-├── Dockerfile             # Docker configuration
-├── docker-compose.yml     # Docker compose configuration
 ├── requirements.txt       # Python dependencies
 └── README.md              # This file
 ```
@@ -66,9 +63,8 @@ Intraday_Equity/
 
 ### Prerequisites
 - Python 3.8+
-- Docker (optional, for containerized deployment)
 
-### Local Installation
+### Installation Steps
 1. Clone the repository
 2. Install dependencies:
    ```bash
@@ -108,42 +104,6 @@ The dashboard provides:
 - Trade analysis with heatmaps and scatter plots
 - Detailed trade logs
 - Strategy configuration summary
-
-## Docker Deployment
-
-### Using Docker Compose (Recommended)
-
-1. Build and run the application:
-   ```bash
-   docker-compose up -d
-   ```
-
-2. Access the application at `http://localhost:8501`
-
-3. To stop the application:
-   ```bash
-   docker-compose down
-   ```
-
-### Manual Docker Build
-
-1. Build the Docker image:
-   ```bash
-   docker build -t intraday-strategy .
-   ```
-
-2. Run the container:
-   ```bash
-   docker run -p 8501:8501 -v $(pwd)/stock_data:/app/stock_data -v $(pwd)/results:/app/results intraday-strategy
-   ```
-
-### Docker Compose Configuration
-
-The `docker-compose.yml` file includes:
-- Port mapping (8501:8501)
-- Volume mounts for data and results
-- Environment variables
-- Resource limits
 
 ## Configuration
 
@@ -189,8 +149,7 @@ Backtest results are saved in the `results/` directory:
 
 1. **Import errors**: Ensure all files are in the correct directory structure
 2. **Data format issues**: Verify CSV files have the correct columns and format
-3. **Docker permissions**: Use `chmod` to set appropriate permissions on mounted volumes
-4. **Memory issues**: Increase Docker memory allocation if needed
+3. **Memory issues**: Close other applications if you encounter memory errors
 
 ### Debug Mode
 
@@ -216,250 +175,48 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 This software is for educational and research purposes only. It should not be used for live trading without proper testing and validation. The authors are not responsible for any financial losses incurred through the use of this software.
 ```
 
-## Docker Deployment Files
+## Simplified Project Structure
 
-### Dockerfile
-
-```dockerfile
-# Use official Python image
-FROM python:3.9-slim
-
-# Set working directory
-WORKDIR /app
-
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    gcc \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy requirements file
-COPY requirements.txt .
-
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy application code
-COPY . .
-
-# Create necessary directories
-RUN mkdir -p stock_data results
-
-# Expose port
-EXPOSE 8501
-
-# Set environment variables
-ENV PYTHONPATH=/app
-ENV STREAMLIT_SERVER_PORT=8501
-ENV STREAMLIT_SERVER_HEADLESS=true
-ENV STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8501/_stcore/health || exit 1
-
-# Run the application
-CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+```
+Intraday_Equity/
+├── src/
+│   ├── __init__.py
+│   ├── data_loader.py
+│   ├── indicators.py
+│   ├── backtesting.py
+│   ├── performance.py
+│   └── utils.py
+├── app.py
+├── stock_data/
+├── results/
+├── config/
+│   └── config.yaml
+├── requirements.txt
+└── README.md
 ```
 
-### docker-compose.yml
+## Running the Application
 
-```yaml
-version: '3.8'
-
-services:
-  intraday-strategy:
-    build: .
-    ports:
-      - "8501:8501"
-    volumes:
-      - ./stock_data:/app/stock_data
-      - ./results:/app/results
-    environment:
-      - PYTHONPATH=/app
-      - STREAMLIT_SERVER_PORT=8501
-      - STREAMLIT_SERVER_HEADLESS=true
-      - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          memory: 2G
-        reservations:
-          memory: 1G
-```
-
-### .dockerignore
-
-```gitignore
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# Data
-stock_data/*
-!stock_data/.gitkeep
-results/*
-!results/.gitkeep
-
-# Logs
-*.log
-logs/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Docker
-Dockerfile
-docker-compose.yml
-.dockerignore
-
-# Git
-.git/
-.gitignore
-```
-
-## Deployment Instructions
-
-### 1. Build and Run with Docker Compose
-
+1. Install dependencies:
 ```bash
-# Start the application
-docker-compose up -d
-
-# View logs
-docker-compose logs -f
-
-# Stop the application
-docker-compose down
+pip install -r requirements.txt
 ```
-
-### 2. Manual Docker Deployment
-
-```bash
-# Build the image
-docker build -t intraday-strategy .
-
-# Run the container
-docker run -d \
-  -p 8501:8501 \
-  -v $(pwd)/stock_data:/app/stock_data \
-  -v $(pwd)/results:/app/results \
-  --name intraday-app \
-  intraday-strategy
-
-# View running container
-docker ps
-
-# View logs
-docker logs -f intraday-app
-
-# Stop the container
-docker stop intraday-app
-```
-
-### 3. Environment Variables
-
-You can customize the deployment using environment variables:
-
-```bash
-# Set custom port
-export STREAMLIT_SERVER_PORT=8502
-
-# Enable debug mode
-export DEBUG=true
-
-# Set memory limits
-export DOCKER_MEMORY_LIMIT=4G
-```
-
-### 4. Data Persistence
-
-To ensure your data persists between container restarts:
-
-1. Create the required directories:
-   ```bash
-   mkdir -p stock_data results
-   ```
 
 2. Place your CSV files in the `stock_data` directory
 
-3. The `results` directory will contain backtest outputs
-
-### 5. Updating the Application
-
-To update the application:
-
+3. Run the Streamlit app:
 ```bash
-# Pull latest changes
-git pull
-
-# Rebuild the container
-docker-compose build
-
-# Restart the service
-docker-compose up -d
+streamlit run app.py
 ```
 
-## Troubleshooting Docker Deployment
+4. Open your browser and navigate to `http://localhost:8501`
 
-### Common Issues
+## Key Features of the Streamlit Application
 
-1. **Port already in use**:
-   ```bash
-   # Change the port in docker-compose.yml
-   ports:
-     - "8502:8501"
-   ```
+1. **Interactive Parameter Tuning**: Adjust all strategy parameters through the sidebar
+2. **File Upload**: Upload CSV files directly through the web interface
+3. **Visual Analytics**: Interactive charts and visualizations of backtest results
+4. **Performance Metrics**: Comprehensive performance reporting with key metrics
+5. **Export Functionality**: Download results in CSV format
 
-2. **Permission denied**:
-   ```bash
-   # Change ownership of directories
-   sudo chown -R $USER:$USER stock_data results
-   ```
-
-3. **Out of memory**:
-   ```bash
-   # Increase memory limits in docker-compose.yml
-   deploy:
-     resources:
-       limits:
-         memory: 4G
-   ```
-
-4. **Docker daemon not running**:
-   ```bash
-   # Start Docker service
-   sudo systemctl start docker
-   ```
-
-### Debugging
-
-To debug container issues:
-
-```bash
-# Run in foreground mode
-docker-compose up
-
-# Access container shell
-docker exec -it intraday-strategy /bin/bash
-
-# View container logs
-docker logs intraday-strategy
-```
-
-This complete setup provides a robust, containerized deployment of your intraday trading strategy with a user-friendly web interface for backtesting and analysis.
+This simplified setup focuses on the Streamlit application for easy local deployment and usage without the complexity of Docker containers.
