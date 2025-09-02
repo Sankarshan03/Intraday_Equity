@@ -1,6 +1,5 @@
 import pandas as pd
 import numpy as np
-# FIXED: Use absolute import instead of relative import
 from src.indicators import calculate_ema, calculate_rsi
 
 class BacktestEngine:
@@ -8,29 +7,23 @@ class BacktestEngine:
         self.config = config
         self.trade_log = []
         self.trades = []
-        # FIXED: Access base_capital from the strategy section of config
         self.equity_curve = [config['strategy']['base_capital']]
+        self.original_data = None
         
     def calculate_indicators(self, data):
         """
-        Calculate all required indicators for the strategy
+        Calculate all required indicators for the strategy with proper alignment
         """
+        # Store original data for reference
+        self.original_data = data.copy()
+        
         results = []
         
         for symbol, group in data.groupby('Symbol'):
             group = group.copy()
             
-            # Calculate 10-minute OHLC data - FIXED: Changed '10T' to '10min'
+            # Create 10-minute OHLC data
             ohlc_10min = group.resample('10min').agg({
-                'Open': 'first',
-                'High': 'max',
-                'Low': 'min',
-                'Close': 'last',
-                'Volume': 'sum'
-            }).dropna()
-            
-            # Calculate 1-hour OHLC data for EMA50 - FIXED: Changed '1H' to '1h'
-            ohlc_1hr = group.resample('1h').agg({
                 'Open': 'first',
                 'High': 'max',
                 'Low': 'min',
@@ -43,18 +36,9 @@ class BacktestEngine:
             ohlc_10min['EMA10'] = calculate_ema(ohlc_10min['Close'], self.config['indicators']['ema_slow'])
             ohlc_10min['RSI14'] = calculate_rsi(ohlc_10min['Close'], self.config['indicators']['rsi_period'])
             
-            # Calculate EMA50 on 1-hour data
-            ohlc_1hr['EMA50'] = calculate_ema(ohlc_1hr['Close'], self.config['indicators']['ema_trend'])
-            
-            # Merge EMA50 from 1-hour to 10-minute data
-            ohlc_10min = ohlc_10min.merge(
-                ohlc_1hr['EMA50'], 
-                how='left', 
-                left_index=True, 
-                right_index=True,
-                suffixes=('', '_1hr')
-            )
-            ohlc_10min['EMA50'] = ohlc_10min['EMA50'].ffill()
+            # Calculate EMA50 on the same 10-minute data (not 1-hour)
+            # This ensures all indicators are on the same timeframe
+            ohlc_10min['EMA50'] = calculate_ema(ohlc_10min['Close'], self.config['indicators']['ema_trend'])
             
             # Add symbol information
             ohlc_10min['Symbol'] = symbol
@@ -68,6 +52,23 @@ class BacktestEngine:
             result_df = pd.DataFrame()
         
         return result_df
+    
+    def get_low_of_last_5_minutes(self, symbol, timestamp):
+        """
+        Get the low of the last 5 minutes of 1-minute candles for a specific symbol and timestamp
+        """
+        # Get the 1-minute data for this symbol
+        symbol_data = self.original_data[self.original_data['Symbol'] == symbol]
+        
+        # Filter to the last 5 minutes before the current timestamp
+        start_time = timestamp - pd.Timedelta(minutes=5)
+        filtered_data = symbol_data[(symbol_data.index >= start_time) & (symbol_data.index <= timestamp)]
+        
+        if filtered_data.empty:
+            return None
+        
+        # Return the minimum low price
+        return filtered_data['Low'].min()
     
     def run_backtest(self, data):
         """
@@ -111,25 +112,24 @@ class BacktestEngine:
         max_profit = 0
         quantity = 0
         
-        # FIXED: Access base_capital from the strategy section of config
         capital = self.equity_curve[-1]
         risk_amount = capital * self.config['strategy']['risk_per_trade']
         
-        # Iterate through each candle
+        # Iterate through each 10-minute candle
         for idx, row in stock_data.iterrows():
             current_price = row['Close']
             
             # Check if we're in a position
             if position is None:
-                # Check for long entry signal
-                if (row['EMA3'] > row['EMA10'] and 
-                    row['RSI14'] > self.config['indicators']['rsi_overbought'] and 
-                    row['Close'] > row['EMA50']):
-                    
+                # Check for long entry signal - with some tolerance
+                ema_condition = row['EMA3'] > row['EMA10'] * 1.001  # 0.1% buffer
+                rsi_condition = row['RSI14'] > self.config['indicators']['rsi_overbought'] - 5  # 5-point buffer
+                trend_condition = row['Close'] > row['EMA50'] * 1.002  # 0.2% buffer
+                
+                if ema_condition and rsi_condition and trend_condition:
                     position = 'Long'
                     entry_price = row['High']  # Buy at high of entry candle
                     entry_time = idx
-                    # FIXED: Access stop_loss from the strategy section of config
                     stop_loss = entry_price * (1 - self.config['strategy']['stop_loss'])
                     profit_target = entry_price * (1 + self.config['strategy']['profit_target'])
                     
@@ -147,21 +147,21 @@ class BacktestEngine:
                     self.log_trade_entry(symbol, 'BUY', entry_price, quantity, entry_time)
                     print(f"Long entry: {symbol} at {entry_price}, quantity: {quantity}")
                 
-                # Check for short entry signal
-                elif (row['EMA3'] < row['EMA10'] and 
-                      row['RSI14'] < self.config['indicators']['rsi_oversold'] and 
-                      row['Close'] < row['EMA50']):
-                    
+                # Check for short entry signal - with some tolerance
+                ema_condition = row['EMA3'] < row['EMA10'] * 0.999  # 0.1% buffer
+                rsi_condition = row['RSI14'] < self.config['indicators']['rsi_oversold'] + 5  # 5-point buffer
+                trend_condition = row['Close'] < row['EMA50'] * 0.998  # 0.2% buffer
+                
+                if ema_condition and rsi_condition and trend_condition:
                     position = 'Short'
-                    # Get low of last 5 minutes for short entry
-                    prev_data = stock_data.loc[:idx].tail(5)
-                    if not prev_data.empty:
-                        entry_price = prev_data['Low'].min()
-                    else:
-                        entry_price = row['Low']  # Fallback to current low
+                    # Get low of last 5 minutes of 1-minute candles for short entry
+                    entry_price = self.get_low_of_last_5_minutes(symbol, idx)
+                    
+                    if entry_price is None:
+                        # Fallback to current low if no 1-minute data available
+                        entry_price = row['Low']
                     
                     entry_time = idx
-                    # FIXED: Access stop_loss from the strategy section of config
                     stop_loss = entry_price * (1 + self.config['strategy']['stop_loss'])
                     profit_target = entry_price * (1 - self.config['strategy']['profit_target'])
                     
@@ -200,12 +200,10 @@ class BacktestEngine:
                         trailing_active = False
                     
                     # Update trailing stop if in profit
-                    # FIXED: Access profit_trail_start from the strategy section of config
                     elif current_price > entry_price * (1 + self.config['strategy']['profit_trail_start']):
                         trailing_active = True
                         if current_price > max_profit:
                             max_profit = current_price
-                            # FIXED: Access trailing_stop from the strategy section of config
                             stop_loss = max_profit * (1 - self.config['strategy']['trailing_stop'])
                 
                 elif position == 'Short':
@@ -227,12 +225,10 @@ class BacktestEngine:
                         trailing_active = False
                     
                     # Update trailing stop if in profit
-                    # FIXED: Access profit_trail_start from the strategy section of config
                     elif current_price < entry_price * (1 - self.config['strategy']['profit_trail_start']):
                         trailing_active = True
                         if current_price < max_profit:
                             max_profit = current_price
-                            # FIXED: Access trailing_stop from the strategy section of config
                             stop_loss = max_profit * (1 + self.config['strategy']['trailing_stop'])
     
     def check_long_exit(self, current_price, entry_price, stop_loss, profit_target, trailing_active, max_profit):
