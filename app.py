@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 import os
 import sys
@@ -13,7 +14,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 # Now import from src package using absolute imports
 from src.data_loader import prepare_data_for_backtesting
 from src.backtesting import BacktestEngine
-from src.performance import calculate_performance_metrics, generate_performance_report
+from src.performance import calculate_performance_metrics, generate_performance_report, get_selected_stocks_info
 from src.utils import load_config, save_results
 
 # Set page configuration
@@ -149,8 +150,14 @@ def main():
                 # Display data info
                 st.info(f"Loaded data with {len(df)} rows and {df['Symbol'].nunique()} symbols")
                 
-                # Initialize and run backtest
+                # Initialize backtest engine
                 backtester = BacktestEngine(config)
+                
+                # Store selected stocks for display
+                backtester.selected_stocks = df['Symbol'].unique().tolist()
+                
+                # Run backtest
+                print("Running backtest...")
                 trade_log, trades, equity_curve = backtester.run_backtest(df)
                 
                 # Convert to DataFrames
@@ -158,6 +165,7 @@ def main():
                 trades_df = pd.DataFrame(trades)
                 
                 # Calculate performance metrics
+                print("Calculating performance metrics...")
                 metrics = calculate_performance_metrics(trades_df, equity_curve)
                 
                 # Store results in session state
@@ -168,6 +176,9 @@ def main():
                     'equity_curve': equity_curve,
                     'config': config
                 }
+                
+                # Store backtest engine for selected stocks info
+                st.session_state.backtest_engine = backtester
                 
                 st.session_state.trades_df = trades_df
                 st.session_state.equity_curve = equity_curve
@@ -193,79 +204,407 @@ def main():
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            st.metric("Total Return", f"{metrics['total_return']:.2f}%")
+            return_color = "🟢" if metrics['total_return'] >= 0 else "🔴"
+            st.metric(
+                "Total Return", 
+                f"{return_color} {metrics['total_return']:.2f}%",
+                help="Overall percentage return on initial capital"
+            )
+        
         with col2:
-            st.metric("Win Rate", f"{metrics['win_rate']:.2f}%")
+            dd_color = "🔴" if metrics['max_drawdown'] > 10 else "🟡" if metrics['max_drawdown'] > 5 else "🟢"
+            st.metric(
+                "Max Drawdown", 
+                f"{dd_color} {metrics['max_drawdown']:.2f}%",
+                help="Maximum peak-to-trough decline in portfolio value"
+            )
+        
         with col3:
-            st.metric("Profit Factor", f"{metrics['profit_factor']:.2f}")
+            win_color = "🟢" if metrics['win_rate'] > 50 else "🔴"
+            st.metric(
+                "Win Rate", 
+                f"{win_color} {metrics['win_rate']:.1f}%",
+                help="Percentage of profitable trades"
+            )
+        
         with col4:
-            st.metric("Max Drawdown", f"{metrics['max_drawdown']:.2f}%")
+            sharpe_color = "🟢" if metrics['sharpe_ratio'] > 1 else "🟡" if metrics['sharpe_ratio'] > 0 else "🔴"
+            st.metric(
+                "Sharpe Ratio", 
+                f"{sharpe_color} {metrics['sharpe_ratio']:.3f}",
+                help="Risk-adjusted return measure (>1 is excellent, >0 is good)"
+            )
         
-        col5, col6, col7, col8 = st.columns(4)
-        
-        with col5:
-            st.metric("Number of Trades", len(trades_df))
-        with col6:
-            avg_profit = metrics['avg_profit'] if metrics['avg_profit'] else 0
-            st.metric("Avg Profit", f"₹{avg_profit:.2f}")
-        with col7:
-            avg_loss = metrics['avg_loss'] if metrics['avg_loss'] else 0
-            st.metric("Avg Loss", f"₹{avg_loss:.2f}")
-        with col8:
-            st.metric("Sharpe Ratio", f"{metrics['sharpe_ratio']:.2f}")
-        
-        # Equity curve chart
-        st.header("📈 Equity Curve")
+        # Enhanced Equity Curve with Drawdown
+        st.header("📈 Portfolio Performance")
         
         equity_df = pd.DataFrame({
-            'Day': range(len(equity_curve)),
+            'Period': range(len(equity_curve)),
             'Equity': equity_curve
         })
         
-        fig_equity = px.line(
-            equity_df, 
-            x='Day', 
-            y='Equity', 
-            title='Portfolio Equity Curve',
-            labels={'Equity': 'Portfolio Value (₹)', 'Day': 'Trading Period'}
-        )
-        fig_equity.update_layout(height=500)
-        st.plotly_chart(fig_equity, use_container_width=True)
+        # Calculate drawdown for visualization
+        equity_df['Peak'] = equity_df['Equity'].expanding().max()
+        equity_df['Drawdown'] = (equity_df['Equity'] - equity_df['Peak']) / equity_df['Peak'] * 100
         
-        # Trade analysis
-        st.header("🔍 Trade Analysis")
+        # Create subplot with equity curve and drawdown
+        fig_performance = make_subplots(
+            rows=2, cols=1,
+            subplot_titles=('Portfolio Equity Curve', 'Drawdown Analysis'),
+            vertical_spacing=0.1,
+            row_heights=[0.7, 0.3]
+        )
+        
+        # Equity curve
+        fig_performance.add_trace(
+            go.Scatter(
+                x=equity_df['Period'],
+                y=equity_df['Equity'],
+                mode='lines',
+                name='Portfolio Value',
+                line=dict(color='#1f77b4', width=2),
+                hovertemplate='Period: %{x}<br>Value: ₹%{y:,.2f}<extra></extra>'
+            ),
+            row=1, col=1
+        )
+        
+        # Peak line
+        fig_performance.add_trace(
+            go.Scatter(
+                x=equity_df['Period'],
+                y=equity_df['Peak'],
+                mode='lines',
+                name='Peak Value',
+                line=dict(color='green', width=1, dash='dash'),
+                hovertemplate='Period: %{x}<br>Peak: ₹%{y:,.2f}<extra></extra>'
+            ),
+            row=1, col=1
+        )
+        
+        # Drawdown
+        fig_performance.add_trace(
+            go.Scatter(
+                x=equity_df['Period'],
+                y=equity_df['Drawdown'],
+                mode='lines',
+                name='Drawdown %',
+                fill='tozeroy',
+                line=dict(color='red', width=1),
+                hovertemplate='Period: %{x}<br>Drawdown: %{y:.2f}%<extra></extra>'
+            ),
+            row=2, col=1
+        )
+        
+        fig_performance.update_layout(
+            height=600,
+            showlegend=True,
+            title_text="Portfolio Performance Analysis"
+        )
+        
+        fig_performance.update_xaxes(title_text="Trading Period", row=2, col=1)
+        fig_performance.update_yaxes(title_text="Portfolio Value (₹)", row=1, col=1)
+        fig_performance.update_yaxes(title_text="Drawdown (%)", row=2, col=1)
+        
+        st.plotly_chart(fig_performance, use_container_width=True)
+        
+        # Enhanced Trade Analysis
+        st.header("🔍 Advanced Trade Analysis")
         
         if not trades_df.empty:
-            # Monthly returns heatmap
-            trades_df['Exit_Time'] = pd.to_datetime(trades_df['Exit_Time'])
-            trades_df['YearMonth'] = trades_df['Exit_Time'].dt.to_period('M').astype(str)
-            monthly_pnl = trades_df.groupby('YearMonth')['PnL'].sum().reset_index()
+            # Create tabs for different analyses
+            tab1, tab2, tab3, tab4 = st.tabs(["📊 Distribution Analysis", "📅 Time Analysis", "🎯 Performance Breakdown", "📈 Trade Patterns"])
             
-            fig_heatmap = px.imshow(
-                pd.pivot_table(
-                    trades_df, 
-                    values='PnL', 
-                    index=trades_df['Exit_Time'].dt.year, 
-                    columns=trades_df['Exit_Time'].dt.month, 
-                    aggfunc='sum'
-                ).fillna(0),
-                title='Monthly P&L Heatmap',
-                labels=dict(x="Month", y="Year", color="P&L")
-            )
-            st.plotly_chart(fig_heatmap, use_container_width=True)
+            with tab1:
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # P&L Distribution
+                    fig_pnl_dist = px.histogram(
+                        trades_df,
+                        x='PnL',
+                        nbins=30,
+                        title='P&L Distribution',
+                        labels={'PnL': 'Profit/Loss (₹)', 'count': 'Number of Trades'},
+                        color_discrete_sequence=['#1f77b4']
+                    )
+                    fig_pnl_dist.add_vline(x=0, line_dash="dash", line_color="red", annotation_text="Break-even")
+                    fig_pnl_dist.add_vline(x=trades_df['PnL'].mean(), line_dash="dash", line_color="green", annotation_text="Average")
+                    st.plotly_chart(fig_pnl_dist, use_container_width=True)
+                
+                with col2:
+                    # Return % Distribution
+                    fig_ret_dist = px.histogram(
+                        trades_df,
+                        x='Return_Pct',
+                        nbins=30,
+                        title='Return % Distribution',
+                        labels={'Return_Pct': 'Return (%)', 'count': 'Number of Trades'},
+                        color_discrete_sequence=['#ff7f0e']
+                    )
+                    fig_ret_dist.add_vline(x=0, line_dash="dash", line_color="red", annotation_text="Break-even")
+                    st.plotly_chart(fig_ret_dist, use_container_width=True)
+                
+                # Win/Loss Analysis
+                win_loss_data = pd.DataFrame({
+                    'Type': ['Winning Trades', 'Losing Trades'],
+                    'Count': [len(trades_df[trades_df['PnL'] > 0]), len(trades_df[trades_df['PnL'] <= 0])],
+                    'Total P&L': [trades_df[trades_df['PnL'] > 0]['PnL'].sum(), trades_df[trades_df['PnL'] <= 0]['PnL'].sum()]
+                })
+                
+                fig_pie = px.pie(
+                    win_loss_data,
+                    values='Count',
+                    names='Type',
+                    title='Win/Loss Trade Distribution',
+                    color_discrete_sequence=['#2ca02c', '#d62728']
+                )
+                st.plotly_chart(fig_pie, use_container_width=True)
             
-            # Trade duration vs returns scatter plot
-            trades_df['Hold_Days'] = (trades_df['Exit_Time'] - trades_df['Entry_Time']).dt.total_seconds() / (60 * 60 * 24)
-            fig_scatter = px.scatter(
-                trades_df,
-                x='Hold_Days',
-                y='PnL',
-                color='Return_Pct',
-                title='Trade Duration vs Returns',
-                labels={'Hold_Days': 'Hold Time (Days)', 'PnL': 'Profit/Loss (₹)'},
-                hover_data=['Symbol', 'Entry_Price', 'Exit_Price']
-            )
-            st.plotly_chart(fig_scatter, use_container_width=True)
+            with tab2:
+                # Time-based analysis
+                trades_df['Exit_Time'] = pd.to_datetime(trades_df['Exit_Time'])
+                trades_df['Entry_Time'] = pd.to_datetime(trades_df['Entry_Time'])
+                trades_df['Hold_Hours'] = (trades_df['Exit_Time'] - trades_df['Entry_Time']).dt.total_seconds() / 3600
+                trades_df['Entry_Hour'] = trades_df['Entry_Time'].dt.hour
+                trades_df['Exit_Hour'] = trades_df['Exit_Time'].dt.hour
+                trades_df['Day_of_Week'] = trades_df['Entry_Time'].dt.day_name()
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # Entry time analysis
+                    hourly_pnl = trades_df.groupby('Entry_Hour')['PnL'].agg(['sum', 'count', 'mean']).reset_index()
+                    fig_hourly = px.bar(
+                        hourly_pnl,
+                        x='Entry_Hour',
+                        y='sum',
+                        title='P&L by Entry Hour',
+                        labels={'Entry_Hour': 'Entry Hour', 'sum': 'Total P&L (₹)'},
+                        color='sum',
+                        color_continuous_scale='RdYlGn'
+                    )
+                    st.plotly_chart(fig_hourly, use_container_width=True)
+                
+                with col2:
+                    # Day of week analysis
+                    daily_pnl = trades_df.groupby('Day_of_Week')['PnL'].agg(['sum', 'count', 'mean']).reset_index()
+                    day_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
+                    daily_pnl['Day_of_Week'] = pd.Categorical(daily_pnl['Day_of_Week'], categories=day_order, ordered=True)
+                    daily_pnl = daily_pnl.sort_values('Day_of_Week')
+                    
+                    fig_daily = px.bar(
+                        daily_pnl,
+                        x='Day_of_Week',
+                        y='sum',
+                        title='P&L by Day of Week',
+                        labels={'Day_of_Week': 'Day', 'sum': 'Total P&L (₹)'},
+                        color='sum',
+                        color_continuous_scale='RdYlGn'
+                    )
+                    st.plotly_chart(fig_daily, use_container_width=True)
+                
+                # Monthly heatmap
+                if len(trades_df['Exit_Time'].dt.month.unique()) > 1:
+                    monthly_pivot = pd.pivot_table(
+                        trades_df,
+                        values='PnL',
+                        index=trades_df['Exit_Time'].dt.year,
+                        columns=trades_df['Exit_Time'].dt.month,
+                        aggfunc='sum'
+                    ).fillna(0)
+                    
+                    fig_heatmap = px.imshow(
+                        monthly_pivot,
+                        title='Monthly P&L Heatmap',
+                        labels=dict(x="Month", y="Year", color="P&L (₹)"),
+                        color_continuous_scale='RdYlGn',
+                        aspect="auto"
+                    )
+                    st.plotly_chart(fig_heatmap, use_container_width=True)
+            
+            with tab3:
+                # Performance breakdown by symbol
+                symbol_performance = trades_df.groupby('Symbol').agg({
+                    'PnL': ['sum', 'count', 'mean'],
+                    'Return_Pct': 'mean'
+                }).round(2)
+                symbol_performance.columns = ['Total P&L', 'Trade Count', 'Avg P&L', 'Avg Return %']
+                symbol_performance = symbol_performance.sort_values('Total P&L', ascending=False)
+                
+                # Top performers
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.subheader("🏆 Top Performing Stocks")
+                    top_performers = symbol_performance.head(10)
+                    fig_top = px.bar(
+                        top_performers.reset_index(),
+                        x='Symbol',
+                        y='Total P&L',
+                        title='Top 10 Stocks by Total P&L',
+                        color='Total P&L',
+                        color_continuous_scale='Greens'
+                    )
+                    fig_top.update_xaxes(tickangle=45)
+                    st.plotly_chart(fig_top, use_container_width=True)
+                
+                with col2:
+                    st.subheader("📉 Worst Performing Stocks")
+                    worst_performers = symbol_performance.tail(10)
+                    fig_worst = px.bar(
+                        worst_performers.reset_index(),
+                        x='Symbol',
+                        y='Total P&L',
+                        title='Bottom 10 Stocks by Total P&L',
+                        color='Total P&L',
+                        color_continuous_scale='Reds'
+                    )
+                    fig_worst.update_xaxes(tickangle=45)
+                    st.plotly_chart(fig_worst, use_container_width=True)
+                
+                # Performance table
+                st.subheader("📊 Detailed Symbol Performance")
+                st.dataframe(
+                    symbol_performance.style.format({
+                        'Total P&L': '₹{:.2f}',
+                        'Avg P&L': '₹{:.2f}',
+                        'Avg Return %': '{:.2f}%'
+                    }).background_gradient(subset=['Total P&L'], cmap='RdYlGn'),
+                    use_container_width=True
+                )
+            
+            with tab4:
+                # Trade patterns and correlations
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # Hold time vs returns
+                    fig_scatter = px.scatter(
+                        trades_df,
+                        x='Hold_Hours',
+                        y='PnL',
+                        color='Return_Pct',
+                        title='Hold Time vs P&L',
+                        labels={'Hold_Hours': 'Hold Time (Hours)', 'PnL': 'Profit/Loss (₹)'},
+                        hover_data=['Symbol', 'Entry_Price', 'Exit_Price'],
+                        color_continuous_scale='RdYlGn'
+                    )
+                    st.plotly_chart(fig_scatter, use_container_width=True)
+                
+                with col2:
+                    # Exit reason analysis
+                    if 'Exit_Reason' in trades_df.columns:
+                        exit_analysis = trades_df.groupby('Exit_Reason').agg({
+                            'PnL': ['sum', 'count', 'mean']
+                        }).round(2)
+                        exit_analysis.columns = ['Total P&L', 'Count', 'Avg P&L']
+                        
+                        fig_exit = px.bar(
+                            exit_analysis.reset_index(),
+                            x='Exit_Reason',
+                            y='Total P&L',
+                            title='P&L by Exit Reason',
+                            color='Total P&L',
+                            color_continuous_scale='RdYlGn'
+                        )
+                        st.plotly_chart(fig_exit, use_container_width=True)
+                
+                # Consecutive wins/losses analysis
+                trades_df_sorted = trades_df.sort_values('Entry_Time')
+                trades_df_sorted['Win'] = trades_df_sorted['PnL'] > 0
+                trades_df_sorted['Streak'] = (trades_df_sorted['Win'] != trades_df_sorted['Win'].shift()).cumsum()
+                
+                streaks = trades_df_sorted.groupby('Streak').agg({
+                    'Win': ['first', 'count'],
+                    'PnL': 'sum'
+                })
+                streaks.columns = ['Is_Win', 'Length', 'Total_PnL']
+                streaks['Streak_Type'] = streaks['Is_Win'].map({True: 'Winning', False: 'Losing'})
+                
+                fig_streaks = px.scatter(
+                    streaks.reset_index(),
+                    x='Length',
+                    y='Total_PnL',
+                    color='Streak_Type',
+                    title='Win/Loss Streak Analysis',
+                    labels={'Length': 'Streak Length', 'Total_PnL': 'Total P&L (₹)'},
+                    color_discrete_map={'Winning': 'green', 'Losing': 'red'}
+                )
+                st.plotly_chart(fig_streaks, use_container_width=True)
+        
+        # Selected Stocks for Trading
+        st.header("📋 Selected Stocks for Trading")
+        
+        # Get selected stocks information from backtest engine
+        if 'backtest_engine' in st.session_state:
+            selected_stocks_info = get_selected_stocks_info(st.session_state.backtest_engine)
+            
+            if not selected_stocks_info.empty:
+                st.subheader("Top 10 Stocks Selected at 9:25 AM (Based on Turnover)")
+                st.caption("These stocks were selected for trading based on highest turnover during 9:15-9:25 AM period")
+                
+                # Format the display
+                display_df = selected_stocks_info.copy()
+                display_df['Turnover'] = display_df['Turnover'].apply(lambda x: f"₹{x:,.0f}")
+                display_df['Avg_Price'] = display_df['Avg_Price'].apply(lambda x: f"₹{x:.2f}")
+                display_df['Total_Volume'] = display_df['Total_Volume'].apply(lambda x: f"{x:,.0f}")
+                
+                # Rename columns for display
+                display_df = display_df.rename(columns={
+                    'Symbol': 'Stock Symbol',
+                    'Turnover': 'Turnover (₹)',
+                    'Avg_Price': 'Avg Price (₹)',
+                    'Total_Volume': 'Total Volume',
+                    'Selection_Period': 'Selection Period'
+                })
+                
+                st.dataframe(
+                    display_df,
+                    use_container_width=True,
+                    hide_index=True
+                )
+                
+                # Turnover visualization
+                fig_turnover = px.bar(
+                    selected_stocks_info,
+                    x='Symbol',
+                    y='Turnover',
+                    title='Stock Selection by Turnover (9:15-9:25 AM)',
+                    labels={'Turnover': 'Turnover (₹)', 'Symbol': 'Stock Symbol'},
+                    color='Turnover',
+                    color_continuous_scale='Blues'
+                )
+                fig_turnover.update_layout(height=400)
+                st.plotly_chart(fig_turnover, use_container_width=True)
+                
+                # Trading timeline info
+                st.info("📅 **Trading Timeline**: Stock selection at 9:25 AM → Trading starts from 11th minute (9:26 AM onwards)")
+            else:
+                st.warning("No selected stocks information available. Please run the backtest first.")
+        else:
+            st.warning("Please run the backtest to see selected stocks information.")
+        
+        # Trade summary
+        if not trades_df.empty:
+            st.header("📊 Trade Summary")
+            
+            summary_col1, summary_col2, summary_col3 = st.columns(3)
+            
+            with summary_col1:
+                st.metric("Total Trades", len(trades_df))
+                st.metric("Winning Trades", len(trades_df[trades_df['PnL'] > 0]))
+            
+            with summary_col2:
+                st.metric("Losing Trades", len(trades_df[trades_df['PnL'] <= 0]))
+                avg_pnl = trades_df['PnL'].mean()
+                st.metric("Avg P&L per Trade", f"₹{avg_pnl:.2f}")
+            
+            with summary_col3:
+                total_pnl = trades_df['PnL'].sum()
+                st.metric("Total P&L", f"₹{total_pnl:.2f}")
+                if len(trades_df) > 0:
+                    avg_duration = (pd.to_datetime(trades_df['Exit_Time']) - pd.to_datetime(trades_df['Entry_Time'])).dt.total_seconds().mean() / 3600
+                    st.metric("Avg Trade Duration", f"{avg_duration:.1f}h")
         
         # Trade log table
         st.header("📋 Trade Log")

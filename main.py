@@ -27,6 +27,9 @@ def main():
         # Initialize backtest engine
         backtester = BacktestEngine(config)
         
+        # Store selected stocks for display
+        backtester.selected_stocks = df['Symbol'].unique().tolist()
+        
         # Run backtest
         print("Running backtest...")
         trade_log, trades, equity_curve = backtester.run_backtest(df)
