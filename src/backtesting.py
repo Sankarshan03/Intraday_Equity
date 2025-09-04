@@ -9,10 +9,14 @@ class BacktestEngine:
         self.trades = []
         self.equity_curve = [config['strategy']['base_capital']]
         self.original_data = None
+        self.selected_stocks = []
         
     def calculate_indicators(self, data):
         """
         Calculate all required indicators for the strategy with proper alignment
+        EMA(3) and EMA(10) on 10-minute timeframe
+        EMA(50) on 1-hour timeframe
+        RSI(14) on 10-minute timeframe
         """
         # Store original data for reference
         self.original_data = data.copy()
@@ -22,7 +26,7 @@ class BacktestEngine:
         for symbol, group in data.groupby('Symbol'):
             group = group.copy()
             
-            # Create 10-minute OHLC data
+            # Create 10-minute OHLC data for EMA3, EMA10, and RSI14
             ohlc_10min = group.resample('10min').agg({
                 'Open': 'first',
                 'High': 'max',
@@ -31,14 +35,28 @@ class BacktestEngine:
                 'Volume': 'sum'
             }).dropna()
             
-            # Calculate EMAs and RSI on 10-minute data
+            # Create 1-hour OHLC data for EMA50
+            ohlc_1hour = group.resample('1h').agg({
+                'Open': 'first',
+                'High': 'max',
+                'Low': 'min',
+                'Close': 'last',
+                'Volume': 'sum'
+            }).dropna()
+            
+            # Calculate EMAs and RSI on their respective timeframes
             ohlc_10min['EMA3'] = calculate_ema(ohlc_10min['Close'], self.config['indicators']['ema_fast'])
             ohlc_10min['EMA10'] = calculate_ema(ohlc_10min['Close'], self.config['indicators']['ema_slow'])
             ohlc_10min['RSI14'] = calculate_rsi(ohlc_10min['Close'], self.config['indicators']['rsi_period'])
             
-            # Calculate EMA50 on the same 10-minute data (not 1-hour)
-            # This ensures all indicators are on the same timeframe
-            ohlc_10min['EMA50'] = calculate_ema(ohlc_10min['Close'], self.config['indicators']['ema_trend'])
+            # Calculate EMA50 on 1-hour data
+            ohlc_1hour['EMA50_1H'] = calculate_ema(ohlc_1hour['Close'], self.config['indicators']['ema_trend'])
+            
+            # Merge EMA50 from 1-hour data to 10-minute data using forward fill
+            # This aligns the 1-hour EMA50 with 10-minute candles
+            ohlc_10min = ohlc_10min.join(ohlc_1hour[['EMA50_1H']], how='left')
+            ohlc_10min['EMA50'] = ohlc_10min['EMA50_1H'].ffill()
+            ohlc_10min.drop('EMA50_1H', axis=1, inplace=True)
             
             # Add symbol information
             ohlc_10min['Symbol'] = symbol
@@ -87,12 +105,20 @@ class BacktestEngine:
         for date in dates:
             print(f"Processing date: {date}")
             
-            # Process each day
+            # Process each day - filter to start trading from 9:30 AM onwards
             day_data = data_with_indicators[data_with_indicators.index.normalize() == date]
             
+            # Filter trading data to start from 9:26 AM (post stock selection at 9:25 AM)
+            trading_start_time = pd.Timestamp.combine(date.date(), pd.Timestamp("09:26:00").time())
+            trading_data = day_data[day_data.index >= trading_start_time]
+            
+            if trading_data.empty:
+                print(f"No trading data available for {date} after 9:26 AM")
+                continue
+            
             # Process each stock in the data (already filtered to top stocks)
-            for symbol in day_data['Symbol'].unique():
-                stock_data = day_data[day_data['Symbol'] == symbol].copy()
+            for symbol in trading_data['Symbol'].unique():
+                stock_data = trading_data[trading_data['Symbol'] == symbol].copy()
                 if not stock_data.empty:
                     self.process_stock(stock_data, symbol)
         
