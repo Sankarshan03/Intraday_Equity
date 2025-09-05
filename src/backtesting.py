@@ -10,19 +10,72 @@ class BacktestEngine:
         self.equity_curve = [config['strategy']['base_capital']]
         self.original_data = None
         self.selected_stocks = []
+        self.collective_ema50_data = None
         
+    def load_collective_data_for_ema50(self, data_folder="stock_data_aug_2025"):
+        """
+        Load all 30 days of data from stock_data folder for EMA50 calculation
+        """
+        from src.data_loader import load_data_from_folder, preprocess_data, filter_market_hours
+        
+        try:
+            # Load complete 30 days dataset
+            full_df = load_data_from_folder(data_folder)
+            full_df = preprocess_data(full_df)
+            full_df = filter_market_hours(full_df)
+            
+            # Create 1-hour OHLC data for all symbols across all 30 days
+            collective_1hour_data = []
+            
+            for symbol, group in full_df.groupby('Symbol'):
+                group = group.copy().sort_index()
+                
+                # Create 1-hour OHLC data
+                ohlc_1hour = group.resample('1h').agg({
+                    'Open': 'first',
+                    'High': 'max',
+                    'Low': 'min',
+                    'Close': 'last',
+                    'Volume': 'sum'
+                }).dropna()
+                
+                ohlc_1hour['Symbol'] = symbol
+                collective_1hour_data.append(ohlc_1hour)
+            
+            if collective_1hour_data:
+                all_1hour_data = pd.concat(collective_1hour_data)
+                
+                # Calculate EMA50 for each symbol using complete 30 days data
+                ema50_results = {}
+                for symbol, group in all_1hour_data.groupby('Symbol'):
+                    group = group.sort_index()
+                    group['EMA50_1H'] = calculate_ema(group['Close'], self.config['indicators']['ema_trend'])
+                    ema50_results[symbol] = group[['EMA50_1H']]
+                
+                self.collective_ema50_data = ema50_results
+                print(f"Loaded EMA50 data for {len(ema50_results)} symbols using 30 days collective data")
+            
+        except Exception as e:
+            print(f"Warning: Could not load collective data for EMA50: {e}")
+            self.collective_ema50_data = None
+    
     def calculate_indicators(self, data):
         """
         Calculate all required indicators for the strategy with proper alignment
         EMA(3) and EMA(10) on 10-minute timeframe
-        EMA(50) on 1-hour timeframe
+        EMA(50) on 1-hour timeframe using 30 days of collective data from stock_data folder
         RSI(14) on 10-minute timeframe
         """
         # Store original data for reference
         self.original_data = data.copy()
         
+        # Load collective 30 days data for EMA50 if not already loaded
+        if self.collective_ema50_data is None:
+            self.load_collective_data_for_ema50()
+        
         results = []
         
+        # Process each symbol for 10-minute indicators
         for symbol, group in data.groupby('Symbol'):
             group = group.copy()
             
@@ -35,28 +88,20 @@ class BacktestEngine:
                 'Volume': 'sum'
             }).dropna()
             
-            # Create 1-hour OHLC data for EMA50
-            ohlc_1hour = group.resample('1h').agg({
-                'Open': 'first',
-                'High': 'max',
-                'Low': 'min',
-                'Close': 'last',
-                'Volume': 'sum'
-            }).dropna()
-            
-            # Calculate EMAs and RSI on their respective timeframes
+            # Calculate EMAs and RSI on 10-minute timeframe
             ohlc_10min['EMA3'] = calculate_ema(ohlc_10min['Close'], self.config['indicators']['ema_fast'])
             ohlc_10min['EMA10'] = calculate_ema(ohlc_10min['Close'], self.config['indicators']['ema_slow'])
             ohlc_10min['RSI14'] = calculate_rsi(ohlc_10min['Close'], self.config['indicators']['rsi_period'])
             
-            # Calculate EMA50 on 1-hour data
-            ohlc_1hour['EMA50_1H'] = calculate_ema(ohlc_1hour['Close'], self.config['indicators']['ema_trend'])
-            
-            # Merge EMA50 from 1-hour data to 10-minute data using forward fill
-            # This aligns the 1-hour EMA50 with 10-minute candles
-            ohlc_10min = ohlc_10min.join(ohlc_1hour[['EMA50_1H']], how='left')
-            ohlc_10min['EMA50'] = ohlc_10min['EMA50_1H'].ffill()
-            ohlc_10min.drop('EMA50_1H', axis=1, inplace=True)
+            # Merge EMA50 from collective 30 days data to 10-minute data using forward fill
+            if self.collective_ema50_data and symbol in self.collective_ema50_data:
+                ohlc_10min = ohlc_10min.join(self.collective_ema50_data[symbol], how='left')
+                ohlc_10min['EMA50'] = ohlc_10min['EMA50_1H'].ffill()
+                ohlc_10min.drop('EMA50_1H', axis=1, inplace=True)
+            else:
+                # Fallback if no EMA50 data available
+                ohlc_10min['EMA50'] = np.nan
+                print(f"Warning: No collective EMA50 data available for {symbol}")
             
             # Add symbol information
             ohlc_10min['Symbol'] = symbol
@@ -137,6 +182,12 @@ class BacktestEngine:
         trailing_active = False
         max_profit = 0
         quantity = 0
+        pending_long_entry = False
+        pending_long_target_price = 0
+        pending_long_candle_idx = None
+        pending_short_entry = False
+        pending_short_target_price = 0
+        pending_short_candle_idx = None
         
         capital = self.equity_curve[-1]
         risk_amount = capital * self.config['strategy']['risk_per_trade']
@@ -147,63 +198,97 @@ class BacktestEngine:
             
             # Check if we're in a position
             if position is None:
-                # Check for long entry signal - with some tolerance
+                # Check if we have a pending long entry and price has reached target
+                if pending_long_entry:
+                    # Check if current candle's high reaches the target price
+                    if row['High'] >= pending_long_target_price:
+                        position = 'Long'
+                        entry_price = pending_long_target_price  # Enter at the target price
+                        entry_time = idx
+                        stop_loss = entry_price * (1 - self.config['strategy']['stop_loss'])
+                        profit_target = entry_price * (1 + self.config['strategy']['profit_target'])
+                        
+                        # Calculate quantity based on risk
+                        risk_per_share = entry_price - stop_loss
+                        if risk_per_share > 0:
+                            quantity = int(risk_amount / risk_per_share)
+                        else:
+                            quantity = 0
+                        
+                        # Ensure we have at least 1 share
+                        quantity = max(1, quantity)
+                        
+                        # Log the trade entry
+                        self.log_trade_entry(symbol, 'BUY', entry_price, quantity, entry_time)
+                        print(f"Long entry executed: {symbol} at {entry_price}, quantity: {quantity}")
+                        
+                        # Reset pending entry
+                        pending_long_entry = False
+                        pending_long_target_price = 0
+                        pending_long_candle_idx = None
+                        # Also reset any pending short entry
+                        pending_short_entry = False
+                        pending_short_target_price = 0
+                        pending_short_candle_idx = None
+                
+                # Check for new long entry signal - with some tolerance
                 ema_condition = row['EMA3'] > row['EMA10'] * 1.001  # 0.1% buffer
                 rsi_condition = row['RSI14'] > self.config['indicators']['rsi_overbought'] - 5  # 5-point buffer
                 trend_condition = row['Close'] > row['EMA50'] * 1.002  # 0.2% buffer
                 
-                if ema_condition and rsi_condition and trend_condition:
-                    position = 'Long'
-                    entry_price = row['High']  # Buy at high of entry candle
-                    entry_time = idx
-                    stop_loss = entry_price * (1 - self.config['strategy']['stop_loss'])
-                    profit_target = entry_price * (1 + self.config['strategy']['profit_target'])
-                    
-                    # Calculate quantity based on risk
-                    risk_per_share = entry_price - stop_loss
-                    if risk_per_share > 0:
-                        quantity = int(risk_amount / risk_per_share)
-                    else:
-                        quantity = 0
-                    
-                    # Ensure we have at least 1 share
-                    quantity = max(1, quantity)
-                    
-                    # Log the trade entry
-                    self.log_trade_entry(symbol, 'BUY', entry_price, quantity, entry_time)
-                    print(f"Long entry: {symbol} at {entry_price}, quantity: {quantity}")
+                if ema_condition and rsi_condition and trend_condition and not pending_long_entry:
+                    # Set up pending long entry - wait for price to reach high of entry candle
+                    pending_long_entry = True
+                    pending_long_target_price = row['High']  # Target price is high of current candle
+                    pending_long_candle_idx = idx
+                    print(f"Long entry signal detected for {symbol}. Waiting for price to reach {pending_long_target_price}")
                 
-                # Check for short entry signal - with some tolerance
+                # Check if we have a pending short entry and price has reached target
+                if pending_short_entry:
+                    # Check if current candle's low reaches the target price
+                    if row['Low'] <= pending_short_target_price:
+                        position = 'Short'
+                        entry_price = pending_short_target_price  # Enter at the target price
+                        entry_time = idx
+                        stop_loss = entry_price * (1 + self.config['strategy']['stop_loss'])
+                        profit_target = entry_price * (1 - self.config['strategy']['profit_target'])
+                        
+                        # Calculate quantity based on risk
+                        risk_per_share = stop_loss - entry_price
+                        if risk_per_share > 0:
+                            quantity = int(risk_amount / risk_per_share)
+                        else:
+                            quantity = 0
+                        
+                        # Ensure we have at least 1 share
+                        quantity = max(1, quantity)
+                        
+                        # Log the trade entry
+                        self.log_trade_entry(symbol, 'SELL', entry_price, quantity, entry_time)
+                        print(f"Short entry executed: {symbol} at {entry_price}, quantity: {quantity}")
+                        
+                        # Reset pending entry
+                        pending_short_entry = False
+                        pending_short_target_price = 0
+                        pending_short_candle_idx = None
+                
+                # Check for new short entry signal - with some tolerance
                 ema_condition = row['EMA3'] < row['EMA10'] * 0.999  # 0.1% buffer
                 rsi_condition = row['RSI14'] < self.config['indicators']['rsi_oversold'] + 5  # 5-point buffer
                 trend_condition = row['Close'] < row['EMA50'] * 0.998  # 0.2% buffer
                 
-                if ema_condition and rsi_condition and trend_condition:
-                    position = 'Short'
-                    # Get low of last 5 minutes of 1-minute candles for short entry
-                    entry_price = self.get_low_of_last_5_minutes(symbol, idx)
+                if ema_condition and rsi_condition and trend_condition and not pending_short_entry:
+                    # Set up pending short entry - wait for price to reach low of last 5 minutes
+                    target_price = self.get_low_of_last_5_minutes(symbol, idx)
                     
-                    if entry_price is None:
+                    if target_price is None:
                         # Fallback to current low if no 1-minute data available
-                        entry_price = row['Low']
+                        target_price = row['Low']
                     
-                    entry_time = idx
-                    stop_loss = entry_price * (1 + self.config['strategy']['stop_loss'])
-                    profit_target = entry_price * (1 - self.config['strategy']['profit_target'])
-                    
-                    # Calculate quantity based on risk
-                    risk_per_share = stop_loss - entry_price
-                    if risk_per_share > 0:
-                        quantity = int(risk_amount / risk_per_share)
-                    else:
-                        quantity = 0
-                    
-                    # Ensure we have at least 1 share
-                    quantity = max(1, quantity)
-                    
-                    # Log the trade entry
-                    self.log_trade_entry(symbol, 'SELL', entry_price, quantity, entry_time)
-                    print(f"Short entry: {symbol} at {entry_price}, quantity: {quantity}")
+                    pending_short_entry = True
+                    pending_short_target_price = target_price
+                    pending_short_candle_idx = idx
+                    print(f"Short entry signal detected for {symbol}. Waiting for price to reach {pending_short_target_price}")
             
             else:
                 # We're in a position, check exit conditions
@@ -224,6 +309,13 @@ class BacktestEngine:
                         # Reset position
                         position = None
                         trailing_active = False
+                        # Also reset any pending entries
+                        pending_long_entry = False
+                        pending_long_target_price = 0
+                        pending_long_candle_idx = None
+                        pending_short_entry = False
+                        pending_short_target_price = 0
+                        pending_short_candle_idx = None
                     
                     # Update trailing stop if in profit
                     elif current_price > entry_price * (1 + self.config['strategy']['profit_trail_start']):
@@ -249,6 +341,13 @@ class BacktestEngine:
                         # Reset position
                         position = None
                         trailing_active = False
+                        # Also reset any pending entries
+                        pending_long_entry = False
+                        pending_long_target_price = 0
+                        pending_long_candle_idx = None
+                        pending_short_entry = False
+                        pending_short_target_price = 0
+                        pending_short_candle_idx = None
                     
                     # Update trailing stop if in profit
                     elif current_price < entry_price * (1 - self.config['strategy']['profit_trail_start']):
