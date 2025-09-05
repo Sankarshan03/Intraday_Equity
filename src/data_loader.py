@@ -3,10 +3,13 @@ import numpy as np
 import os
 import glob
 from datetime import datetime
+from numba import njit
+import warnings
+warnings.filterwarnings('ignore')
 
 def load_data_from_folder(folder_path):
     """
-    Load all CSV files from the specified folder
+    Load all CSV files from the specified folder - optimized version
     """
     # Find all CSV files in the folder
     csv_files = glob.glob(os.path.join(folder_path, "*.csv"))
@@ -14,12 +17,17 @@ def load_data_from_folder(folder_path):
     if not csv_files:
         raise ValueError(f"No CSV files found in {folder_path}")
     
-    # Read and concatenate all CSV files
+    # Read and concatenate all CSV files with optimizations
     dfs = []
     for file in csv_files:
         try:
             print(f"Loading file: {file}")
-            df = pd.read_csv(file)
+            # Use optimized pandas settings for faster loading
+            df = pd.read_csv(file, 
+                           engine='c',  # Use C engine for faster parsing
+                           low_memory=False,  # Read entire file into memory
+                           dtype={'volume': 'float32', 'open': 'float32', 
+                                 'high': 'float32', 'low': 'float32', 'close': 'float32'})
             dfs.append(df)
         except Exception as e:
             print(f"Error reading file {file}: {e}")
@@ -27,7 +35,8 @@ def load_data_from_folder(folder_path):
     if not dfs:
         raise ValueError("No valid CSV files could be read")
     
-    combined_df = pd.concat(dfs, ignore_index=True)
+    # Use more efficient concatenation
+    combined_df = pd.concat(dfs, ignore_index=True, copy=False)
     return combined_df
 
 def preprocess_data(df):
@@ -78,9 +87,16 @@ def filter_market_hours(df, market_start="09:15", market_end="15:30"):
                   (df.index.time <= pd.to_datetime(market_end).time())
     return df[time_filter]
 
+@njit
+def calculate_turnover_numba(volumes, closes):
+    """
+    Fast turnover calculation using Numba
+    """
+    return np.sum(volumes * closes)
+
 def select_top_stocks_by_turnover(df, selection_time="09:25", selection_minutes=10):
     """
-    Select top stocks by turnover for the first 10 minutes
+    Select top stocks by turnover for the first 10 minutes - optimized version
     """
     if df.empty:
         return []
@@ -96,12 +112,15 @@ def select_top_stocks_by_turnover(df, selection_time="09:25", selection_minutes=
     if selection_data.empty:
         return []
     
-    # Calculate turnover for each stock (sum of volume * close)
-    turnover = selection_data.groupby('Symbol').apply(
-        lambda x: (x['Volume'] * x['Close']).sum()
-    )
+    # Calculate turnover for each stock using optimized method
+    turnover_dict = {}
+    for symbol, group in selection_data.groupby('Symbol'):
+        volumes = group['Volume'].values
+        closes = group['Close'].values
+        turnover_dict[symbol] = calculate_turnover_numba(volumes, closes)
     
-    # Select top 10 stocks
+    # Convert to series and select top 10 stocks
+    turnover = pd.Series(turnover_dict)
     top_stocks = turnover.nlargest(10).index.tolist()
     
     print(f"Top 10 stocks by turnover: {top_stocks}")
