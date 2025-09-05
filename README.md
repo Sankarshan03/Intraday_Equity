@@ -27,13 +27,13 @@ A comprehensive intraday trading strategy implementation using Exponential Movin
 - **EMA Signal**: EMA(3) > EMA(10) with 0.1% tolerance buffer
 - **RSI Signal**: RSI(14) > 60 (configurable, optimized to 55 with buffer)
 - **Trend Filter**: Close > EMA(50) with 0.2% tolerance buffer
-- **Entry Price**: High of the entry candle
+- **Entry Price**: High of the entry candle (Untile high entry price is reached)
 
 #### Short Entry
 - **EMA Signal**: EMA(3) < EMA(10) with 0.1% tolerance buffer
 - **RSI Signal**: RSI(14) < 30 (configurable, optimized to 35 with buffer)
 - **Trend Filter**: Close < EMA(50) with 0.2% tolerance buffer
-- **Entry Price**: Low of last 5 minutes (1-minute candles)
+- **Entry Price**: Low of last 5 minutes (1-minute candles) (Untile low entry price is reached)
 
 ### Risk Management
 - **Base Capital**: ₹10,00,000 (configurable)
@@ -230,7 +230,7 @@ $env:DEBUG="true"
 
 ### Multi-Timeframe Architecture
 - **Primary Indicators**: EMA(3), EMA(10), RSI(14) calculated on 10-minute OHLC data
-- **Trend Filter**: EMA(50) calculated on 1-hour OHLC data, forward-filled to 10-minute intervals
+- **Trend Filter**: EMA(50) calculated on 1-hour OHLC data based on past 30 days of stock_data, forward-filled to 10-minute intervals
 - **Entry Precision**: Short entries use 1-minute data for precise low-of-last-5-minutes calculation
 
 ### Advanced Features
